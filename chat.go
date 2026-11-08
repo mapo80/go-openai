@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"io"
@@ -160,8 +161,14 @@ type Audio struct {
 }
 
 func (m ChatCompletionMessage) MarshalJSON() ([]byte, error) {
+	return jsonv2.Marshal(m, openai.EncodeOptions)
+}
+
+// MarshalJSONTo writes the message into the encoder that writes the
+// request, without bytes of its own to validate and copy again.
+func (m ChatCompletionMessage) MarshalJSONTo(enc *jsontext.Encoder) error {
 	if m.Content != "" && m.MultiContent != nil {
-		return nil, ErrContentFieldsMisused
+		return ErrContentFieldsMisused
 	}
 	if len(m.MultiContent) > 0 {
 		msg := struct {
@@ -177,7 +184,7 @@ func (m ChatCompletionMessage) MarshalJSON() ([]byte, error) {
 			Audio            *Audio                     `json:"audio,omitempty"`
 			ExtraFields      map[string]json.RawMessage `json:"-"`
 		}(m)
-		return json.Marshal(msg)
+		return jsonv2.MarshalEncode(enc, msg)
 	}
 
 	if m.Role == ChatMessageRoleTool {
@@ -194,7 +201,7 @@ func (m ChatCompletionMessage) MarshalJSON() ([]byte, error) {
 			Audio            *Audio                     `json:"audio,omitempty"`
 			ExtraFields      map[string]json.RawMessage `json:"-"`
 		}(m)
-		return json.Marshal(msg)
+		return jsonv2.MarshalEncode(enc, msg)
 	}
 
 	msg := struct {
@@ -210,7 +217,7 @@ func (m ChatCompletionMessage) MarshalJSON() ([]byte, error) {
 		Audio            *Audio                     `json:"audio,omitempty"`
 		ExtraFields      map[string]json.RawMessage `json:"-"`
 	}(m)
-	return json.Marshal(msg)
+	return jsonv2.MarshalEncode(enc, msg)
 }
 
 func (m *ChatCompletionMessage) UnmarshalJSON(bs []byte) error {

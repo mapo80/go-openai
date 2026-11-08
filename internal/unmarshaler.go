@@ -65,7 +65,7 @@ func UnmarshalExtraFields(typ reflect.Type, data []byte) (map[string]json.RawMes
 	if err != nil {
 		return nil, err
 	}
-	dec := jsontext.NewDecoder(bytes.NewReader(data), DecodeOptions)
+	dec := jsontext.NewDecoder(bytes.NewBuffer(data), DecodeOptions)
 	tok, err := dec.ReadToken()
 	if err != nil {
 		return nil, err
