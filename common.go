@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"reflect"
 
@@ -27,7 +28,7 @@ func (u *Usage) UnmarshalJSON(data []byte) error {
 
 	type Alias Usage
 	alias := &Alias{}
-	err := json.Unmarshal(data, alias)
+	err := jsonv2.Unmarshal(data, alias, openai.DecodeOptions)
 	if err != nil {
 		return err
 	}

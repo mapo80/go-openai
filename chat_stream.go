@@ -1,13 +1,15 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
+	"fmt"
 	"io"
 	"net/http"
-	"reflect"
-
-	"github.com/bytedance/sonic"
+	"strings"
 
 	openai "github.com/meguminnnnnnnnn/go-openai/internal"
 )
@@ -32,29 +34,87 @@ type ChatCompletionStreamChoiceDelta struct {
 }
 
 func (c *ChatCompletionStreamChoiceDelta) UnmarshalJSON(bs []byte) error {
-	msg := struct {
-		Content          string                     `json:"content,omitempty"`
-		Role             string                     `json:"role,omitempty"`
-		FunctionCall     *FunctionCall              `json:"function_call,omitempty"`
-		ToolCalls        []ToolCall                 `json:"tool_calls,omitempty"`
-		Refusal          string                     `json:"refusal,omitempty"`
-		ReasoningContent string                     `json:"reasoning_content,omitempty"`
-		Audio            *Audio                     `json:"audio,omitempty"`
-		ExtraFields      map[string]json.RawMessage `json:"-"`
-	}{}
-	err := json.Unmarshal(bs, &msg)
+	return jsonv2.Unmarshal(bs, c, openai.DecodeOptions)
+}
+
+// UnmarshalJSONFrom decodes a delta in one pass over its tokens: each
+// declared member into its field (names matched without case, as before),
+// each other member kept as an extra field. A member whose name differs
+// only in case from a declared one is both, as when the struct and the extra
+// fields were decoded separately.
+func (c *ChatCompletionStreamChoiceDelta) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	tok, err := dec.ReadToken()
 	if err != nil {
 		return err
 	}
-
-	*c = msg
-	var extra map[string]json.RawMessage
-	extra, err = openai.UnmarshalExtraFields(reflect.TypeOf(c), bs)
-	if err != nil {
+	var d ChatCompletionStreamChoiceDelta
+	switch tok.Kind() {
+	case 'n':
+		*c = d
+		return nil
+	case '{':
+	default:
+		return fmt.Errorf("chat completion delta: a JSON object is expected, not %s", tok.Kind())
+	}
+	for dec.PeekKind() != '}' {
+		tok, err = dec.ReadToken()
+		if err != nil {
+			return err
+		}
+		name := tok.String()
+		field := d.field(name)
+		if field == nil {
+			if d.ExtraFields, err = openai.ReadExtraField(dec, nil, name, d.ExtraFields); err != nil {
+				return err
+			}
+			continue
+		}
+		if deltaNames[name] {
+			if err = jsonv2.UnmarshalDecode(dec, field); err != nil {
+				return err
+			}
+			continue
+		}
+		value, err := dec.ReadValue()
+		if err != nil {
+			return err
+		}
+		if d.ExtraFields == nil {
+			d.ExtraFields = map[string]json.RawMessage{}
+		}
+		d.ExtraFields[name] = bytes.Clone(value)
+		if err = jsonv2.Unmarshal(value, field, dec.Options()); err != nil {
+			return err
+		}
+	}
+	if _, err = dec.ReadToken(); err != nil {
 		return err
 	}
+	*c = d
+	return nil
+}
 
-	c.ExtraFields = extra
+var deltaNames = map[string]bool{"content": true, "role": true, "function_call": true, "tool_calls": true,
+	"refusal": true, "reasoning_content": true, "audio": true}
+
+// field is the field of the declared member name, matched without case.
+func (d *ChatCompletionStreamChoiceDelta) field(name string) any {
+	switch {
+	case strings.EqualFold(name, "content"):
+		return &d.Content
+	case strings.EqualFold(name, "role"):
+		return &d.Role
+	case strings.EqualFold(name, "function_call"):
+		return &d.FunctionCall
+	case strings.EqualFold(name, "tool_calls"):
+		return &d.ToolCalls
+	case strings.EqualFold(name, "refusal"):
+		return &d.Refusal
+	case strings.EqualFold(name, "reasoning_content"):
+		return &d.ReasoningContent
+	case strings.EqualFold(name, "audio"):
+		return &d.Audio
+	}
 	return nil
 }
 
@@ -106,10 +166,16 @@ type ChatCompletionStreamResponse struct {
 }
 
 func (c *ChatCompletionStreamResponse) UnmarshalJSON(data []byte) error {
+	return c.decodeChunk(data)
+}
+
+// decodeChunk decodes one chunk of the stream in a single pass (json/v2,
+// the delta by its tokens) and keeps data as RawBody.
+func (c *ChatCompletionStreamResponse) decodeChunk(data []byte) error {
 	type chatCompletionStreamResponse ChatCompletionStreamResponse
 	response := chatCompletionStreamResponse{}
 
-	err := sonic.Unmarshal(data, &response)
+	err := jsonv2.Unmarshal(data, &response, openai.DecodeOptions)
 	if err != nil {
 		return err
 	}

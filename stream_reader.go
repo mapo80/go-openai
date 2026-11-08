@@ -6,15 +6,26 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 
 	utils "github.com/meguminnnnnnnnn/go-openai/internal"
 )
 
-var (
-	headerData  = regexp.MustCompile(`^data:\s*`)
-	errorPrefix = regexp.MustCompile(`^data:\s*{"error":`)
-)
+// dataPayload is the payload of an SSE data line (the line without its
+// "data:" prefix and the white space after it: the \s of RE2, [\t\n\f\r ]),
+// and whether line is one.
+func dataPayload(line []byte) ([]byte, bool) {
+	rest, ok := bytes.CutPrefix(line, []byte("data:"))
+	if !ok {
+		return nil, false
+	}
+	return bytes.TrimLeft(rest, "\t\n\f\r "), true
+}
+
+// chunkDecoder decodes a stream chunk in one pass, without the generic
+// unmarshaler's scan before the type's own decoding.
+type chunkDecoder interface {
+	decodeChunk(data []byte) error
+}
 
 type streamable interface {
 	ChatCompletionStreamResponse | CompletionResponse
@@ -38,7 +49,11 @@ func (stream *streamReader[T]) Recv() (response T, err error) {
 		return
 	}
 
-	err = stream.unmarshaler.Unmarshal(rawLine, &response)
+	if chunk, ok := any(&response).(chunkDecoder); ok {
+		err = chunk.decodeChunk(rawLine)
+	} else {
+		err = stream.unmarshaler.Unmarshal(rawLine, &response)
+	}
 	if err != nil {
 		return
 	}
@@ -71,12 +86,13 @@ func (stream *streamReader[T]) processLines() ([]byte, error) {
 		}
 
 		noSpaceLine := bytes.TrimSpace(rawLine)
-		if errorPrefix.Match(noSpaceLine) {
+		payload, isData := dataPayload(noSpaceLine)
+		if isData && bytes.HasPrefix(payload, []byte(`{"error":`)) {
 			hasErrorPrefix = true
 		}
-		if !headerData.Match(noSpaceLine) || hasErrorPrefix {
-			if hasErrorPrefix {
-				noSpaceLine = headerData.ReplaceAll(noSpaceLine, nil)
+		if !isData || hasErrorPrefix {
+			if hasErrorPrefix && isData {
+				noSpaceLine = payload
 			}
 			writeErr := stream.errAccumulator.Write(noSpaceLine)
 			if writeErr != nil {
@@ -90,13 +106,12 @@ func (stream *streamReader[T]) processLines() ([]byte, error) {
 			continue
 		}
 
-		noPrefixLine := headerData.ReplaceAll(noSpaceLine, nil)
-		if string(noPrefixLine) == "[DONE]" {
+		if string(payload) == "[DONE]" {
 			stream.isFinished = true
 			return nil, io.EOF
 		}
 
-		return noPrefixLine, nil
+		return payload, nil
 	}
 }
 

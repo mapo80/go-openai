@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"io"
 	"net/http"
 	"reflect"
-
-	"github.com/bytedance/sonic"
 
 	openai "github.com/meguminnnnnnnnn/go-openai/internal"
 
@@ -229,7 +228,7 @@ func (m *ChatCompletionMessage) UnmarshalJSON(bs []byte) error {
 		ExtraFields      map[string]json.RawMessage `json:"-"`
 	}{}
 
-	if err := json.Unmarshal(bs, &msg); err == nil {
+	if err := jsonv2.Unmarshal(bs, &msg, openai.DecodeOptions); err == nil {
 		*m = ChatCompletionMessage(msg)
 		var extra map[string]json.RawMessage
 		extra, err = openai.UnmarshalExtraFields(reflect.TypeOf(m), bs)
@@ -254,7 +253,7 @@ func (m *ChatCompletionMessage) UnmarshalJSON(bs []byte) error {
 		Audio            *Audio                     `json:"audio,omitempty"`
 		ExtraFields      map[string]json.RawMessage `json:"-"`
 	}{}
-	if err := json.Unmarshal(bs, &multiMsg); err != nil {
+	if err := jsonv2.Unmarshal(bs, &multiMsg, openai.DecodeOptions); err != nil {
 		return err
 	}
 	*m = ChatCompletionMessage(multiMsg)
@@ -563,7 +562,7 @@ func (c *ChatCompletionResponse) UnmarshalJSON(data []byte) error {
 	type chatCompletionResponse ChatCompletionResponse
 
 	response := chatCompletionResponse{}
-	err := sonic.Unmarshal(data, &response)
+	err := jsonv2.Unmarshal(data, &response, openai.DecodeOptions)
 	if err != nil {
 		return err
 	}
