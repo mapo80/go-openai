@@ -436,6 +436,25 @@ func (r ChatCompletionRequest) GetExtraFields() map[string]any {
 	return r.extraFields
 }
 
+// SplitMembers gives the marshaller of a request with extra fields its
+// largest members, the messages and the tools, to write straight into the
+// body: written in the document the extra fields are merged into, they were
+// written twice. Those the extra fields name stay in the request.
+func (r ChatCompletionRequest) SplitMembers(named func(name string) bool) (any, []openai.Member) {
+	members := make([]openai.Member, 0, 2)
+	if !named("messages") {
+		members = append(members, openai.Member{Name: "messages", Value: r.Messages})
+		r.Messages = nil
+	}
+	if !named("tools") {
+		if len(r.Tools) > 0 { // omitempty
+			members = append(members, openai.Member{Name: "tools", Value: r.Tools})
+		}
+		r.Tools = nil
+	}
+	return r, members
+}
+
 type StreamOptions struct {
 	// If set, an additional chunk will be streamed before the data: [DONE] message.
 	// The usage field on this chunk shows the token usage statistics for the entire request,

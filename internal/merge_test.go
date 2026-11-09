@@ -2,12 +2,13 @@ package openai
 
 import (
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"testing"
 
 	jsonpatch "github.com/evanphx/json-patch"
 )
 
-// MergePatch gives the bytes github.com/evanphx/json-patch v0.5.2 gave, the
+// mergePatch gives the bytes github.com/evanphx/json-patch v0.5.2 gave, the
 // merge the SDK used before, for documents and patches as the marshaller
 // writes them.
 func TestMergePatchMatchesJSONPatch(t *testing.T) {
@@ -48,7 +49,11 @@ func TestMergePatchMatchesJSONPatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			want, wantErr := jsonpatch.MergePatch(doc, patch)
-			got, gotErr := MergePatch(doc, patch)
+			var got []byte
+			root, gotErr := mergePatch(doc, patch)
+			if gotErr == nil {
+				got, gotErr = jsonv2.Marshal(root, EncodeOptions)
+			}
 			if (wantErr == nil) != (gotErr == nil) || string(got) != string(want) {
 				t.Fatalf("doc %s patch %s:\n got %s (%v)\nwant %s (%v)", doc, patch, got, gotErr, want, wantErr)
 			}

@@ -18,45 +18,96 @@ type Marshaller interface {
 	Marshal(value any) ([]byte, error)
 }
 
+// Member is a member of a body that the body writes itself, straight into
+// the request.
+type Member struct {
+	Name  string
+	Value any
+}
+
+// MemberSplitter is a body with extra fields whose largest members are
+// written straight into the request, instead of once into the document the
+// extra fields are merged into and once more into the request.
+type MemberSplitter interface {
+	// SplitMembers returns the body without the members it writes itself,
+	// left empty, and those members as the body writes them (not those it
+	// omits). The members the extra fields name, for which named is true,
+	// stay in the body, for the merge to reach them.
+	SplitMembers(named func(name string) bool) (rest any, members []Member)
+}
+
 type JSONMarshaller struct{}
 
+// Marshal writes value. A body with extra fields is written sorted and
+// merged with them as by mergePatch over the marshalled body; the members of
+// a MemberSplitter the extra fields do not name are written once, into the
+// request.
 func (jm *JSONMarshaller) Marshal(value any) ([]byte, error) {
-	originalBytes, err := jsonv2.Marshal(value, EncodeOptions)
-	if err != nil {
-		return nil, err
-	}
 	// Check if the value implements the GetExtraFields interface
 	getExtraFieldsBody, ok := value.(interface {
 		GetExtraFields() map[string]any
 	})
 	if !ok {
-		// If not, return the original bytes
-		return originalBytes, nil
+		return jsonv2.Marshal(value, EncodeOptions)
 	}
 	extraFields := getExtraFieldsBody.GetExtraFields()
 	if len(extraFields) == 0 {
-		// If there are no extra fields, return the original bytes
-		return originalBytes, nil
+		return jsonv2.Marshal(value, EncodeOptions)
+	}
+	rest, members := value, []Member(nil)
+	if splitter, ok := value.(MemberSplitter); ok {
+		rest, members = splitter.SplitMembers(func(name string) bool {
+			_, named := extraFields[name]
+			return named
+		})
+	}
+	originalBytes, err := jsonv2.Marshal(rest, EncodeOptions)
+	if err != nil {
+		return nil, bodyError(value, members, err)
 	}
 	patchBytes, err := jsonv2.Marshal(extraFields, EncodeOptions)
 	if err != nil {
+		if err := bodyError(value, members, nil); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("Marshal extraFields(%+v) err: %w", extraFields, err)
 	}
-	finalBytes, err := MergePatch(originalBytes, patchBytes)
+	root, err := mergePatch(originalBytes, patchBytes)
 	if err != nil {
 		return nil, fmt.Errorf("MergePatch originalBytes(%s) patchBytes(%s) err: %w", originalBytes, patchBytes, err)
+	}
+	for _, m := range members {
+		root.obj[m.Name] = &mergeNode{kind: 'm', value: m.Value}
+	}
+	finalBytes, err := jsonv2.Marshal(root, EncodeOptions)
+	if err != nil {
+		return nil, bodyError(value, members, err)
 	}
 	return finalBytes, nil
 }
 
-// MergePatch applies the JSON merge patch patch (RFC 7386) to the JSON
+// bodyError is the error of marshalling the whole body, which comes before
+// those of its extra fields: with members written apart, err could name
+// another member first, or a member through the merge. Only errors pay for
+// marshalling the body again.
+func bodyError(value any, members []Member, err error) error {
+	if len(members) > 0 {
+		if _, bodyErr := jsonv2.Marshal(value, EncodeOptions); bodyErr != nil {
+			return bodyErr
+		}
+	}
+	return err
+}
+
+// mergePatch applies the JSON merge patch patch (RFC 7386) to the JSON
 // object doc, with the result github.com/evanphx/json-patch v0.5.2 gave for
 // a document and a patch that are objects: the members of every object it
 // opens (the document, the objects merged, the objects and arrays of the
 // patch, from which nulls are pruned) sorted by name, every other value as
-// it was, written with the options of encoding/json. Values are read as
-// tokens; only the objects the patch reaches are opened.
-func MergePatch(doc, patch []byte) ([]byte, error) {
+// it was, written with the options of encoding/json by the root returned
+// (MarshalJSONTo). Values are read as tokens; only the objects the patch
+// reaches are opened.
+func mergePatch(doc, patch []byte) (*mergeNode, error) {
 	root := &mergeNode{raw: doc}
 	if !root.intoDoc() {
 		return nil, fmt.Errorf("merge patch: the document is not a JSON object")
@@ -66,23 +117,24 @@ func MergePatch(doc, patch []byte) ([]byte, error) {
 		return nil, fmt.Errorf("merge patch: the patch is not a JSON object")
 	}
 	mergeDocs(root.obj, p.obj)
-	var out bytes.Buffer
-	out.Grow(len(doc) + len(patch))
-	enc := jsontext.NewEncoder(&out, EncodeOptions)
-	if err := root.write(enc); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), nil
+	return root, nil
+}
+
+// MarshalJSONTo writes the merged document into the encoder of the request.
+func (n *mergeNode) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return n.write(enc)
 }
 
 // mergeNode is a JSON value as the merge sees it: verbatim until the merge
 // opens it as an object (obj, a nil member is null) or an array (arr, a nil
-// element is null).
+// element is null). A member a body writes itself (kind 'm') is added to the
+// root after the merge: its value is marshalled when the root is written.
 type mergeNode struct {
-	raw  jsontext.Value
-	kind byte // 0 verbatim, '{' object, '[' array
-	obj  map[string]*mergeNode
-	arr  []*mergeNode
+	raw   jsontext.Value
+	kind  byte // 0 verbatim, '{' object, '[' array, 'm' member written by the body
+	obj   map[string]*mergeNode
+	arr   []*mergeNode
+	value any
 }
 
 func (n *mergeNode) intoDoc() bool {
@@ -198,6 +250,8 @@ func (n *mergeNode) write(enc *jsontext.Encoder) error {
 	switch {
 	case n == nil:
 		return enc.WriteToken(jsontext.Null)
+	case n.kind == 'm':
+		return jsonv2.MarshalEncode(enc, n.value)
 	case n.kind == '{':
 		if err := enc.WriteToken(jsontext.BeginObject); err != nil {
 			return err
